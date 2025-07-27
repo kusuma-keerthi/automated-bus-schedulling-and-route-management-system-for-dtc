@@ -1,0 +1,1439 @@
+!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DTC Bus Tracking</title>
+    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap" rel="stylesheet">
+    
+    <!-- Load the Google Maps JavaScript API with proper loading pattern -->
+    <script>
+        (g=>{var h,a,k,p="The Google Maps JavaScript API",c="google",l="importLibrary",q="__ib__",m=document,b=window;b=b[c]||(b[c]={});var d=b.maps||(b.maps={}),r=new Set,e=new URLSearchParams,u=()=>h||(h=new Promise(async(f,n)=>{await (a=m.createElement("script"));e.set("libraries",[...r]+"");for(k in g)e.set(k.replace(/[A-Z]/g,t=>"_"+t[0].toLowerCase()),g[k]);e.set("callback",c+".maps."+q);a.src=`https://maps.${c}apis.com/maps/api/js?`+e;d[q]=f;a.onerror=()=>h=n(Error(p+" could not load."));a.nonce=m.querySelector("script[nonce]")?.nonce||"";m.head.append(a)}));d[l]?console.warn(p+" only loads once. Ignoring:",g):d[l]=(f,...n)=>r.add(f)&&u().then(()=>d[l](f,...n))})({
+            key: "AIzaSyCb6YEasWQAzbvAPOU7qYjxXAXQbOelxTY", // Your Google Maps API key
+            v: "weekly",
+            libraries: ["marker", "places"] // Include the libraries you need
+        });
+    </script>
+
+    <!-- Initialize map with Map ID -->
+    <script>
+        async function initMap() {
+            try {
+                const delhi = { lat: 28.6139, lng: 77.2090 };
+                const { Map } = await google.maps.importLibrary("maps");
+                const { AdvancedMarkerElement } = await google.maps.importLibrary("marker");
+                
+                window.map = map = new Map(document.getElementById('map'), {
+                    zoom: 12,
+                    center: delhi,
+                    styles: [
+                        {
+                            featureType: "transit.station.bus",
+                            stylers: [{ visibility: "on" }]
+                        }
+                    ]
+                });
+
+                // Store AdvancedMarkerElement for later use
+                window.AdvancedMarkerElement = AdvancedMarkerElement;
+
+                initWebSocket();
+                updateRouteTable();
+                // Ensure markers are shown after map is ready
+                if (typeof updateBusMarkers === 'function' && typeof allBuses !== 'undefined') {
+                    updateBusMarkers(allBuses);
+                }
+            } catch (error) {
+                console.error('Error initializing map:', error);
+                document.getElementById('map').innerHTML = 'Error loading map. Please refresh the page.';
+            }
+        }
+
+        // Initialize map when the page is ready
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', () => google.maps.importLibrary("maps").then(() => initMap()));
+        } else {
+            google.maps.importLibrary("maps").then(() => initMap());
+        }
+    </script>
+    <style>
+        body {
+            font-family: 'Roboto', sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .nav-buttons {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+        }
+        .nav-button {
+            padding: 12px 24px;
+            background-color: #1976d2;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+            transition: background-color 0.3s;
+        }
+        .nav-button:hover {
+            background-color: #1565c0;
+        }
+        .nav-button.active {
+            background-color: #1565c0;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+        }
+        .section {
+            display: none;
+        }
+        .section.active {
+            display: block;
+        }
+        #map {
+            height: 600px;
+            width: 100%;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+        }
+        .bus-info {
+            background: white;
+            padding: 15px;
+            border-radius: 8px;
+            margin-top: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .bus-list {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+            gap: 15px;
+            margin-top: 20px;
+        }
+        .bus-card {
+            background: white;
+            padding: 15px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .status-on-time {
+            color: green;
+        }
+        .status-delayed {
+            color: red;
+        }
+        .traffic-high {
+            color: red;
+        }
+        .traffic-medium {
+            color: orange;
+        }
+        .traffic-low {
+            color: green;
+        }
+        .schedule-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 20px;
+            background: white;
+            border-radius: 8px;
+            overflow: hidden;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .schedule-table th, .schedule-table td {
+            padding: 12px;
+            text-align: left;
+            border-bottom: 1px solid #eee;
+        }
+        .schedule-table th {
+            background-color: #1976d2;
+            color: white;
+        }
+        .report-form {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            max-width: 600px;
+            margin: 20px auto;
+        }
+        .report-form input, .report-form textarea {
+            width: 100%;
+            padding: 8px;
+            margin: 8px 0;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+        .report-form button {
+            background-color: #1976d2;
+            color: white;
+            padding: 10px 20px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        .report-form button:hover {
+            background-color: #1565c0;
+        }
+        .search-box {
+            margin-bottom: 20px;
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+        }
+        .search-group {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            justify-content: center;
+            flex-wrap: wrap;
+        }
+        .location-search {
+            padding-top: 10px;
+            border-top: 1px solid #eee;
+        }
+        .search-box input {
+            padding: 8px 12px;
+            width: 200px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+        .search-box input:focus {
+            outline: none;
+            border-color: #1976d2;
+            box-shadow: 0 0 0 2px rgba(25, 118, 210, 0.1);
+        }
+        .nav-button {
+            min-width: 100px;
+        }
+        .bus-details {
+            margin-top: 10px;
+            line-height: 1.6;
+        }
+        .bus-details p {
+            margin: 8px 0;
+            padding-left: 10px;
+            border-left: 3px solid #e0e0e0;
+        }
+        .bus-details strong {
+            color: #1976d2;
+            min-width: 140px;
+            display: inline-block;
+        }
+        .tracking-panel {
+            position: fixed;
+            right: -400px;
+            top: 0;
+            width: 380px;
+            height: 100vh;
+            background: white;
+            box-shadow: -2px 0 10px rgba(0,0,0,0.1);
+            transition: right 0.3s ease;
+            z-index: 1000;
+            padding: 20px;
+            overflow-y: auto;
+        }
+
+        .tracking-panel.active {
+            right: 0;
+        }
+
+        .tracking-panel .close-btn {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            background: none;
+            border: none;
+            font-size: 24px;
+            cursor: pointer;
+            color: #666;
+        }
+
+        .tracking-panel h3 {
+            margin-top: 0;
+            padding-bottom: 10px;
+            border-bottom: 2px solid #1976d2;
+            color: #1976d2;
+        }
+
+        .track-btn {
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            padding: 5px 10px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 12px;
+            transition: background-color 0.3s;
+        }
+
+        .track-btn:hover {
+            background-color: #45a049;
+        }
+
+        .live-info {
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 8px;
+            margin-top: 15px;
+        }
+
+        .live-info p {
+            margin: 8px 0;
+            padding: 8px;
+            border-bottom: 1px solid #eee;
+        }
+
+        .live-info p:last-child {
+            border-bottom: none;
+        }
+
+        .status-indicator {
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            margin-right: 5px;
+        }
+
+        .status-indicator.on-time {
+            background-color: #4CAF50;
+        }
+
+        .status-indicator.delayed {
+            background-color: #f44336;
+        }
+
+        .traffic-indicator {
+            font-weight: bold;
+        }
+
+        .traffic-LOW { color: #4CAF50; }
+        .traffic-MEDIUM { color: #FF9800; }
+        .traffic-HIGH { color: #f44336; }
+
+        .visualize-btn {
+            background-color: #1976d2;
+            color: white;
+            border: none;
+            padding: 5px 10px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 12px;
+            margin-left: 5px;
+            transition: background-color 0.3s;
+        }
+        
+        .visualize-btn:hover {
+            background-color: #1565c0;
+        }
+
+        .route-path {
+            stroke: #1976d2;
+            stroke-width: 4;
+            stroke-opacity: 0.8;
+            animation: dash 2s linear infinite;
+        }
+
+        @keyframes dash {
+            to {
+                stroke-dashoffset: 0;
+            }
+        }
+
+        .bus-marker {
+            cursor: pointer;
+            transition: transform 0.2s;
+        }
+        .bus-marker:hover {
+            transform: scale(1.1);
+        }
+        .gm-style-iw {
+            border-radius: 8px;
+            box-shadow: 0 2px 7px 1px rgba(0,0,0,0.3);
+        }
+        .info-window {
+            padding: 15px;
+            min-width: 200px;
+        }
+        .info-window h3 {
+            margin: 0 0 10px 0;
+            color: #1976d2;
+        }
+        .info-window .status {
+            margin: 5px 0;
+            font-weight: bold;
+        }
+        .info-window .time {
+            margin: 5px 0;
+        }
+        .info-window .route {
+            margin: 5px 0;
+        }
+        .info-window .update-time {
+            font-size: 0.8em;
+            color: #666;
+            margin-top: 10px;
+            text-align: right;
+        }
+    </style>
+</head>
+<body>
+    <h1>DTC Bus Tracking System</h1>
+    
+    <div class="nav-buttons">
+        <button class="nav-button" onclick="showSection('routes')">Routes</button>
+        <button class="nav-button" onclick="showSection('schedule')">Schedule</button>
+        <button class="nav-button" onclick="showSection('live-tracking')">Live Tracking</button>
+        <button class="nav-button" onclick="showSection('report')">Report Issue</button>
+    </div>
+
+    <div id="routes" class="section">
+        <h2>Bus Routes</h2>
+        <table class="schedule-table" id="routeTable">
+            <thead>
+                <tr>
+                    <th>Route No.</th>
+                    <th>From</th>
+                    <th>To</th>
+                    <th>Stops</th>
+                </tr>
+            </thead>
+            <tbody id="routeTableBody">
+            </tbody>
+        </table>
+    </div>
+
+    <div id="schedule" class="section">
+        <h2>Bus Schedule</h2>
+        <div class="search-box">
+            <input type="text" id="schedule-search" placeholder="Search by route number or location">
+            <button class="nav-button" onclick="searchSchedule()">Search</button>
+        </div>
+        <table class="schedule-table" id="scheduleTable">
+            <thead>
+                <tr>
+                    <th>Route</th>
+                    <th>From</th>
+                    <th>To</th>
+                    <th>First Bus</th>
+                    <th>Last Bus</th>
+                    <th>Frequency</th>
+                    <th>Status</th>
+                </tr>
+            </thead>
+            <tbody id="scheduleTableBody"></tbody>
+        </table>
+    </div>
+
+    <div id="live-tracking" class="section">
+        <div class="search-box">
+            <input type="text" id="bus-search" placeholder="Search by bus or route number">
+            <button class="nav-button" onclick="searchBuses()">Search</button>
+        </div>
+        <div id="map"></div>
+        <div class="bus-list" id="busList"></div>
+    </div>
+
+    <div id="report" class="section">
+        <h2>Report an Issue</h2>
+        <form class="report-form" id="reportForm">
+            <div>
+                <label for="busNumber">Bus/Route Number:</label>
+                <input type="text" id="busNumber" required>
+            </div>
+            <div>
+                <label for="issueType">Issue Type:</label>
+                <select id="issueType" required>
+                    <option value="">Select an issue type</option>
+                    <option value="delay">Delay</option>
+                    <option value="breakdown">Breakdown</option>
+                    <option value="other">Other</option>
+                </select>
+            </div>
+            <div>
+                <label for="description">Description:</label>
+                <textarea id="description" rows="4" required></textarea>
+            </div>
+            <button type="submit">Submit Report</button>
+        </form>
+        <p style="margin-top:24px;text-align:center;color:var(--text-secondary);">
+            For urgent issues, please contact <a href="mailto:keerthiangel84@gmail.com" style="color:var(--primary);">keerthiangel84@gmail.com</a>
+        </p>
+    </div>
+
+    <div class="tracking-panel" id="trackingPanel">
+        <button class="close-btn" onclick="closeTrackingPanel()">&times;</button>
+        <h3>Live Bus Tracking</h3>
+        <div id="trackingInfo"></div>
+    </div>
+
+    <script>
+        // Initialize global variables
+        let map;
+        let markers = new Map();
+        let currentInfoWindow = null;
+        let ws;
+        let allBuses = [];
+        let currentRoute = null;
+        let routeMarkers = [];
+        let routeAnimation = null;
+        let trackingInterval = null;
+        const API_BASE_URL = 'http://localhost:4567';
+
+        // Store all routes globally for easy access
+        window.allRoutes = generateSampleBuses().map(bus => ({
+            route: bus.route,
+            from: bus.from,
+            to: bus.to,
+            stops: bus.stops || []
+        }));
+
+        // Show/hide sections with proper event parameter
+        function showSection(sectionId) {
+            document.querySelectorAll('.section').forEach(section => {
+                section.classList.remove('active');
+            });
+            document.querySelectorAll('.nav-button').forEach(button => {
+                button.classList.remove('active');
+            });
+            document.getElementById(sectionId).classList.add('active');
+            // Use event.target safely by passing the event object
+            const buttons = document.querySelectorAll('.nav-button');
+            buttons.forEach(button => {
+                if(button.textContent.toLowerCase().includes(sectionId.toLowerCase())) {
+                    button.classList.add('active');
+                }
+            });
+            // If switching to live-tracking, update markers
+            if (sectionId === 'live-tracking' && typeof updateBusMarkers === 'function' && typeof allBuses !== 'undefined' && map) {
+                updateBusMarkers(allBuses);
+            }
+        }
+
+        // Initialize map with error handling and advanced markers
+        async function initMap() {
+            try {
+                const delhi = { lat: 28.6139, lng: 77.2090 };
+                const { Map } = await google.maps.importLibrary("maps");
+                const { AdvancedMarkerElement } = await google.maps.importLibrary("marker");
+                
+                window.map = map = new Map(document.getElementById('map'), {
+                    zoom: 12,
+                    center: delhi,
+                    styles: [
+                        {
+                            featureType: "transit.station.bus",
+                            stylers: [{ visibility: "on" }]
+                        }
+                    ]
+                });
+
+                // Store AdvancedMarkerElement for later use
+                window.AdvancedMarkerElement = AdvancedMarkerElement;
+
+                initWebSocket();
+                updateRouteTable();
+                // Ensure markers are shown after map is ready
+                if (typeof updateBusMarkers === 'function' && typeof allBuses !== 'undefined') {
+                    updateBusMarkers(allBuses);
+                }
+            } catch (error) {
+                console.error('Error initializing map:', error);
+                document.getElementById('map').innerHTML = 'Error loading map. Please refresh the page.';
+            }
+        }
+
+        // Visualize route with error handling
+        function visualizeRoute(routeNumber, from, to) {
+            try {
+                showSection('live-tracking');
+                const route = window.allRoutes.find(r => r.route === routeNumber);
+                if (!route) {
+                    console.error('Route not found:', routeNumber);
+                    return;
+                }
+                showRoutesOnMap(routeNumber);
+            } catch (error) {
+                console.error('Error visualizing route:', error);
+            }
+        }
+
+        // Add error handling to WebSocket connection
+        function initWebSocket() {
+            try {
+                allBuses = generateSampleBuses();
+                updateBusMarkers(allBuses);
+                updateBusList(allBuses);
+                updateScheduleTable(allBuses);
+                
+                setInterval(() => {
+                    try {
+                        allBuses = generateSampleBuses();
+                        updateBusMarkers(allBuses);
+                        updateBusList(allBuses);
+                        updateScheduleTable(allBuses);
+                    } catch (error) {
+                        console.error('Error updating bus data:', error);
+                    }
+                }, 5000);
+            } catch (error) {
+                console.error('Error initializing WebSocket:', error);
+            }
+        }
+
+        // Clean up resources when closing tracking panel
+        function closeTrackingPanel() {
+            const panel = document.getElementById('trackingPanel');
+            panel.classList.remove('active');
+            if (window.trackingInterval) {
+                clearInterval(window.trackingInterval);
+                window.trackingInterval = null;
+            }
+            if (window.routeAnimation) {
+                clearInterval(window.routeAnimation);
+                window.routeAnimation = null;
+            }
+        }
+
+        // Add cleanup on page unload
+        window.addEventListener('beforeunload', () => {
+            if (window.trackingInterval) clearInterval(window.trackingInterval);
+            if (window.routeAnimation) clearInterval(window.routeAnimation);
+            if (ws) ws.close();
+        });
+        
+        // Generate sample bus data
+        function generateSampleBuses() {
+            const buses = [];
+            const dtcRoutes = [
+                // Major Corridor Routes
+                { route: '100', from: 'Shivaji Stadium', to: 'IGI Airport Terminal 3', stops: ['Shivaji Stadium', 'Dhaula Kuan', 'IGI Airport Terminal 2', 'IGI Airport Terminal 3'] },
+                { route: '181', from: 'New Delhi Railway Station', to: 'Mehrauli', stops: ['New Delhi Railway Station', 'Connaught Place', 'AIIMS', 'IIT Delhi', 'Qutub Minar', 'Mehrauli'] },
+                { route: '274', from: 'Shivaji Stadium', to: 'Noida Sector 62', stops: ['Shivaji Stadium', 'ITO', 'Akshardham', 'Noida Sector 15', 'Noida Sector 62'] },
+                { route: '340', from: 'Shivaji Stadium', to: 'Ghaziabad', stops: ['Shivaji Stadium', 'ITO', 'Anand Vihar ISBT', 'Vaishali', 'Ghaziabad'] },
+                
+                // North Delhi Routes
+                { route: '901', from: 'Azadpur', to: 'Old Delhi', stops: ['Azadpur', 'Model Town', 'Kashmere Gate ISBT', 'Red Fort', 'Old Delhi'] },
+                { route: '902', from: 'Rohini Sector 22', to: 'Connaught Place', stops: ['Rohini Sector 22', 'Rohini Sector 18', 'Pitampura', 'Karol Bagh', 'Connaught Place'] },
+                { route: '903', from: 'Narela', to: 'Kashmere Gate ISBT', stops: ['Narela', 'Bawana', 'Rohini', 'Azadpur', 'Kashmere Gate ISBT'] },
+                
+                // South Delhi Routes
+                { route: 'ML-77', from: 'Mehrauli', to: 'AIIMS', stops: ['Mehrauli', 'Qutub Minar', 'Hauz Khas', 'Green Park', 'AIIMS'] },
+                { route: '442', from: 'Saket', to: 'Lajpat Nagar', stops: ['Saket', 'Malviya Nagar', 'Greater Kailash', 'Lajpat Nagar'] },
+                { route: '479', from: 'Vasant Kunj', to: 'South Extension', stops: ['Vasant Kunj', 'Munirka', 'IIT Delhi', 'South Extension'] },
+                
+                // East Delhi Routes
+                { route: '534', from: 'Anand Vihar ISBT', to: 'Connaught Place', stops: ['Anand Vihar ISBT', 'Preet Vihar', 'ITO', 'Delhi Gate', 'Connaught Place'] },
+                { route: '543', from: 'Mayur Vihar Phase III', to: 'Old Delhi', stops: ['Mayur Vihar Phase III', 'Akshardham', 'ITO', 'Delhi Gate', 'Old Delhi'] },
+                { route: '611', from: 'Shahdara', to: 'India Gate', stops: ['Shahdara', 'Seelampur', 'Rajghat', 'ITO', 'India Gate'] },
+                
+                // West Delhi Routes
+                { route: '721', from: 'Dwarka Sector 21', to: 'Karol Bagh', stops: ['Dwarka Sector 21', 'Dwarka Mor', 'Janakpuri', 'Rajouri Garden', 'Karol Bagh'] },
+                { route: '764', from: 'Najafgarh', to: 'Delhi Cantt', stops: ['Najafgarh', 'Dwarka', 'Palam', 'Delhi Cantt'] },
+                { route: '783', from: 'Mundka', to: 'Punjabi Bagh', stops: ['Mundka', 'Nangloi', 'Paschim Vihar', 'Punjabi Bagh'] },
+
+                // Additional Routes
+                { route: '44A', from: 'Harsh Vihar', to: 'Old Delhi Railway Station', stops: ['Harsh Vihar', 'Nand Nagri', 'GTB Hospital', 'Shahdara', 'Old Delhi Railway Station'] },
+                { route: '169A', from: 'Anand Vihar ISBT', to: 'Nizamuddin', stops: ['Anand Vihar ISBT', 'Patparganj', 'ITO', 'Delhi Gate', 'Nizamuddin'] },
+                { route: '234A', from: 'Nangloi', to: 'Mori Gate', stops: ['Nangloi', 'Paschim Vihar', 'Punjabi Bagh', 'Karol Bagh', 'Mori Gate'] },
+                { route: '323A', from: 'Uttam Nagar', to: 'Connaught Place', stops: ['Uttam Nagar', 'Janakpuri', 'Rajouri Garden', 'Karol Bagh', 'Connaught Place'] },
+                { route: '429A', from: 'Rohini Sector 22', to: 'Old Delhi Railway Station', stops: ['Rohini Sector 22', 'Rohini Sector 18', 'Azadpur', 'Kashmere Gate', 'Old Delhi Railway Station'] },
+
+                // Express Routes
+                { route: 'EXP-1', from: 'Anand Vihar', to: 'Gurugram', stops: ['Anand Vihar', 'ITO', 'Dhaula Kuan', 'Gurugram'] },
+                { route: 'EXP-2', from: 'Rohini', to: 'Noida', stops: ['Rohini', 'ISBT', 'ITO', 'Noida'] },
+                { route: 'EXP-3', from: 'Dwarka', to: 'Noida', stops: ['Dwarka', 'Delhi Cantt', 'South Delhi', 'Noida'] },
+                { route: 'EXP-4', from: 'Rohini', to: 'Gurugram', stops: ['Rohini', 'Punjabi Bagh', 'Dhaula Kuan', 'Gurugram'] },
+
+                // Airport Special Routes
+                { route: 'AS-1', from: 'New Delhi Station', to: 'IGI T3', stops: ['New Delhi Station', 'Connaught Place', 'Dhaula Kuan', 'IGI T3'] },
+                { route: 'AS-2', from: 'Anand Vihar', to: 'IGI T3', stops: ['Anand Vihar', 'ITO', 'Delhi Cantt', 'IGI T3'] },
+                { route: 'AS-3', from: 'Rohini', to: 'IGI T1', stops: ['Rohini', 'Punjabi Bagh', 'Palam', 'IGI T1'] },
+
+                // Metro Feeder Routes
+                { route: 'MF-101', from: 'Rohini West Metro', to: 'Rithala', stops: ['Rohini West Metro', 'Sector 7', 'Sector 11', 'Rithala'] },
+                { route: 'MF-102', from: 'Dwarka Mor', to: 'Uttam Nagar', stops: ['Dwarka Mor', 'Sector 1', 'Sector 7', 'Uttam Nagar'] },
+                { route: 'MF-103', from: 'Mayur Vihar', to: 'Trilokpuri', stops: ['Mayur Vihar', 'Phase 1', 'Phase 2', 'Trilokpuri'] },
+
+                // Night Service Routes
+                { route: 'NS-1', from: 'ISBT', to: 'IGI Airport', stops: ['ISBT', 'Connaught Place', 'Dhaula Kuan', 'IGI Airport'] },
+                { route: 'NS-2', from: 'New Delhi Railway Station', to: 'Dwarka', stops: ['New Delhi Railway Station', 'Karol Bagh', 'Rajouri Garden', 'Dwarka'] },
+                { route: 'NS-3', from: 'Anand Vihar', to: 'Rohini', stops: ['Anand Vihar', 'ITO', 'Kashmere Gate', 'Rohini'] },
+                
+                // Circular Routes
+                { route: 'CR-1', from: 'Central Secretariat', to: 'Central Secretariat', stops: ['Central Secretariat', 'India Gate', 'Pragati Maidan', 'ITO', 'Central Secretariat'] },
+                { route: 'CR-2', from: 'Connaught Place', to: 'Connaught Place', stops: ['Connaught Place', 'Mandi House', 'ITO', 'Delhi Gate', 'Connaught Place'] },
+                { route: 'CR-3', from: 'AIIMS', to: 'AIIMS', stops: ['AIIMS', 'South Extension', 'Defence Colony', 'Lajpat Nagar', 'AIIMS'] },
+
+                // Regular Routes from Live Tracking
+                { route: '101', from: 'Old Delhi Railway Station', to: 'Swaroop Nagar', stops: ['Old Delhi Railway Station', 'Novelty Cinema', 'Mori Gate', 'ISBT Kashmere', 'Civil Lines', 'Old Secretariat', 'GTB Nagar', 'Model Town', 'Azadpur', 'Adarsh Nagar', 'Jahangirpuri', 'Swaroop Nagar'] },
+                { route: '102', from: 'Anand Vihar', to: 'Uttam Nagar', stops: ['Anand Vihar', 'Laxmi Nagar', 'ITO', 'Connaught Place', 'Karol Bagh', 'Rajouri Garden', 'Janakpuri', 'Uttam Nagar'] },
+                { route: '105', from: 'Mukhmelpur Village', to: 'Kashmere Gate ISBT', stops: ['Mukhmelpur', 'Narela', 'Ramdev Chowk', 'Shahbad Dairy', 'Rohini Sec 18', 'Rohini', 'Model Town', 'GTB Nagar', 'ISBT Kashmere'] },
+                { route: '114', from: 'Uttam Nagar', to: 'Karol Bagh', stops: ['Uttam Nagar', 'Janakpuri', 'Rajouri Garden', 'Karol Bagh'] },
+                { route: '120', from: 'Ramdev Chowk Narela', to: 'Mori Gate', stops: ['Ramdev Chowk', 'Narela', 'Bawana', 'Rohini', 'Azadpur', 'Model Town', 'Civil Lines', 'Mori Gate'] },
+                { route: '130', from: 'Old Delhi Railway Station', to: 'Ghoga Village', stops: ['Old Delhi Railway Station', 'Mori Gate', 'Civil Lines', 'Azadpur', 'Mukharba Chowk', 'Rohini', 'Bawana', 'Ghoga Village'] }
+            ];
+
+            const trafficConditions = ['LOW', 'MEDIUM', 'HIGH'];
+            const statuses = ['ON_TIME', 'DELAYED'];
+            const frequencies = ['10 mins', '15 mins', '20 mins', '30 mins'];
+
+            // Add schedule information to routes
+            const routesWithSchedule = dtcRoutes.map(route => ({
+                ...route,
+                firstBus: route.route.startsWith('NS') ? '23:00' : '05:00',
+                lastBus: route.route.startsWith('NS') ? '05:00' : '23:00',
+                frequency: route.route.startsWith('EXP') ? '30 mins' : 
+                          route.route.startsWith('AS') ? '20 mins' : 
+                          frequencies[Math.floor(Math.random() * frequencies.length)]
+            }));
+
+            for (let i = 1; i <= 50; i++) {
+                const routeInfo = routesWithSchedule[Math.floor(Math.random() * routesWithSchedule.length)];
+                const status = statuses[Math.floor(Math.random() * statuses.length)];
+                const trafficCondition = trafficConditions[Math.floor(Math.random() * trafficConditions.length)];
+                
+                // Calculate current location based on stops
+                const stopIndex = Math.floor(Math.random() * routeInfo.stops.length);
+                const currentStop = routeInfo.stops[stopIndex];
+                const nextStop = routeInfo.stops[Math.min(stopIndex + 1, routeInfo.stops.length - 1)];
+                
+                // Generate coordinates between current and next stop
+                const progress = Math.random(); // 0 to 1, representing progress between stops
+                const lat = 28.6139 + (Math.random() - 0.5) * 0.2;
+                const lng = 77.2090 + (Math.random() - 0.5) * 0.2;
+                
+                buses.push({
+                    id: `DTC${i.toString().padStart(3, '0')}`,
+                    route: routeInfo.route,
+                    from: routeInfo.from,
+                    to: routeInfo.to,
+                    lat: lat,
+                    lng: lng,
+                    speed: Math.floor(Math.random() * 60),
+                    currentLocation: currentStop,
+                    nextStop: nextStop,
+                    eta: Math.floor(Math.random() * 30),
+                    status: status,
+                    trafficCondition: trafficCondition,
+                    lastUpdated: new Date().toISOString(),
+                    firstBus: routeInfo.firstBus,
+                    lastBus: routeInfo.lastBus,
+                    frequency: routeInfo.frequency
+                });
+            }
+            return buses;
+        }
+
+        // Search functionality
+        function searchBuses() {
+            const searchTerm = document.getElementById('bus-search').value.toLowerCase();
+            const filteredBuses = allBuses.filter(bus => 
+                bus.id.toLowerCase().includes(searchTerm) || 
+                bus.route.toLowerCase().includes(searchTerm)
+            );
+            updateBusMarkers(filteredBuses);
+            
+            // Update bus list with new format
+            const busListElement = document.getElementById('busList');
+            if (filteredBuses.length === 0) {
+                busListElement.innerHTML = '<div class="bus-card">No buses found matching your search.</div>';
+            } else {
+                busListElement.innerHTML = filteredBuses.map(bus => `
+                    <div class="bus-card">
+                        <h3>Bus ${bus.id}</h3>
+                        <div class="bus-details">
+                            <p><strong>Route:</strong> ${bus.route} (${bus.from} → ${bus.to})</p>
+                            <p><strong>Current Location:</strong> ${bus.currentLocation}</p>
+                            <p><strong>Next Stop:</strong> ${bus.nextStop}</p>
+                            <p><strong>Status:</strong> <span class="status-${bus.status.toLowerCase()}">${bus.status}</span></p>
+                            <p><strong>Speed:</strong> ${bus.speed} km/h</p>
+                            <p><strong>ETA to next stop:</strong> ${bus.eta} mins</p>
+                            <p><strong>Traffic:</strong> <span class="traffic-${bus.trafficCondition.toLowerCase()}">${bus.trafficCondition}</span></p>
+                            <p><strong>Last Updated:</strong> ${new Date(bus.lastUpdated).toLocaleTimeString()}</p>
+                        </div>
+                    </div>
+                `).join('');
+            }
+        }
+
+        function searchRoutes() {
+            const searchTerm = document.getElementById('route-search').value.toLowerCase().trim();
+            const tbody = document.getElementById('routeTableBody');
+            const routes = window.allRoutes || [];
+
+            const filteredRoutes = routes.filter(route =>
+                route.route.toLowerCase().includes(searchTerm)
+            );
+
+            if (filteredRoutes.length === 0) {
+                tbody.innerHTML = `
+                    <tr>
+                        <td colspan="4" style="text-align: center; padding: 20px;">
+                            No routes found matching "${searchTerm}". Please try a different route number.
+                        </td>
+                    </tr>`;
+            } else {
+                tbody.innerHTML = filteredRoutes.map(route => `
+                    <tr>
+                        <td>
+                            <div class="route-info">
+                                <strong>Route ${route.route}</strong>
+                                <div class="route-actions">
+                                    <button class="track-btn" onclick="trackRoute('${route.route}')">Track</button>
+                                    <button class="visualize-btn" onclick="visualizeRoute('${route.route}', '${route.from}', '${route.to}')">Show on Map</button>
+                                </div>
+                            </div>
+                        </td>
+                        <td>${route.from}</td>
+                        <td>${route.to}</td>
+                        <td>${route.stops.join(' → ')}</td>
+                    </tr>
+                `).join('');
+
+                // Show first route on map
+                if (filteredRoutes.length > 0) {
+                    const firstRoute = filteredRoutes[0];
+                    visualizeRoute(firstRoute.route, firstRoute.from, firstRoute.to);
+                }
+            }
+        }
+
+        function searchSchedule() {
+            const searchTerm = document.getElementById('schedule-search').value.toLowerCase();
+            const filteredBuses = allBuses.filter(bus =>
+                bus.id.toLowerCase().includes(searchTerm) ||
+                bus.route.toLowerCase().includes(searchTerm) ||
+                bus.from.toLowerCase().includes(searchTerm) ||
+                bus.to.toLowerCase().includes(searchTerm) ||
+                bus.nextStop.toLowerCase().includes(searchTerm)
+            );
+            updateScheduleTable(filteredBuses);
+        }
+
+        // Add event listeners for real-time search
+        document.getElementById('bus-search').addEventListener('input', searchBuses);
+        document.getElementById('route-search').addEventListener('input', searchRoutes);
+        document.getElementById('schedule-search').addEventListener('input', searchSchedule);
+
+        // Update the search box placeholders
+        document.getElementById('bus-search').placeholder = 'Search by DTC bus number, route, or location';
+        document.getElementById('route-search').placeholder = 'Search DTC route number or location';
+        document.getElementById('schedule-search').placeholder = 'Search by route number or location';
+
+        // Update schedule table
+        function updateScheduleTable(buses) {
+            const uniqueRoutes = [];
+            const routeMap = new Map();
+
+            // Group buses by route
+            buses.forEach(bus => {
+                if (!routeMap.has(bus.route)) {
+                    routeMap.set(bus.route, bus);
+                    uniqueRoutes.push(bus);
+                }
+            });
+
+            const tbody = document.getElementById('scheduleTableBody');
+            tbody.innerHTML = uniqueRoutes.map(bus => `
+                <tr>
+                    <td>${bus.route}</td>
+                    <td>${bus.from}</td>
+                    <td>${bus.to}</td>
+                    <td>${bus.firstBus}</td>
+                    <td>${bus.lastBus}</td>
+                    <td>Every ${bus.frequency}</td>
+                    <td class="status-${bus.status.toLowerCase()}">${bus.status}</td>
+                </tr>
+            `).join('');
+        }
+
+        // Handle report form submission
+        document.getElementById('reportForm').addEventListener('submit', async function(e) {
+            e.preventDefault();
+            const busNumber = document.getElementById('busNumber').value;
+            const issueType = document.getElementById('issueType').value;
+            const description = document.getElementById('description').value;
+            try {
+                const response = await fetch('http://localhost:4567/api/report', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ busNumber, issueType, description })
+                });
+                const result = await response.json();
+                if (result.success) {
+                    alert('Report submitted successfully!');
+                    e.target.reset();
+                } else {
+                    alert('Failed to submit report: ' + (result.error || 'Unknown error.'));
+                }
+            } catch (error) {
+                alert('Failed to submit report: ' + error.message);
+            }
+        });
+
+        // Helper function to format time in IST
+        function formatTimeIST(date) {
+            return new Date(date).toLocaleTimeString('en-IN', {
+                timeZone: 'Asia/Kolkata',
+                hour: '2-digit',
+                minute: '2-digit',
+                hour12: true
+            });
+        }
+
+        // Helper function to calculate estimated arrival time
+        function calculateEstimatedTime(distance, speed = 20) {
+            const timeInHours = distance / speed;
+            const timeInMinutes = Math.round(timeInHours * 60);
+            const now = new Date();
+            const estimatedTime = new Date(now.getTime() + timeInMinutes * 60000);
+            return formatTimeIST(estimatedTime);
+        }
+
+        // Update bus markers function with estimated times
+        async function updateBusMarkers(buses) {
+            if (!window.AdvancedMarkerElement || !map) {
+                console.error('Map or AdvancedMarkerElement not initialized');
+                return;
+            }
+
+            try {
+                // Remove markers that are no longer present
+                const currentBusIds = new Set(buses.map(bus => bus.id));
+                for (const [busId, marker] of markers.entries()) {
+                    if (!currentBusIds.has(busId)) {
+                        marker.map = null;
+                        markers.delete(busId);
+                    }
+                }
+
+                // Update or create markers for each bus
+                buses.forEach(bus => {
+                    const position = { lat: bus.lat, lng: bus.lng };
+                    
+                    // Calculate estimated arrival time
+                    const estimatedArrival = calculateEstimatedTime(bus.distanceToDestination || 5); // Default 5km if distance not provided
+                    
+                    // Create marker content with bus icon
+                    const markerContent = document.createElement('div');
+                    markerContent.className = 'bus-marker';
+                    markerContent.innerHTML = `
+                        <img src="https://img.icons8.com/ios-filled/40/000000/bus.png" alt="Bus" style="width:32px;height:32px;display:block;margin:auto;" />
+                        <div style="text-align:center;font-size:12px;font-weight:bold;color:#1976d2;">${bus.route}</div>
+                    `;
+
+                    if (markers.has(bus.id)) {
+                        // Update existing marker
+                        const marker = markers.get(bus.id);
+                        marker.position = position;
+                        marker.content = markerContent;
+                    } else {
+                        // Create new marker
+                        const marker = new window.AdvancedMarkerElement({
+                            map,
+                            position,
+                            content: markerContent,
+                            title: `Bus ${bus.route}`
+                        });
+
+                        marker.addListener("gmp-click", () => {
+                            const content = `
+                                <div class="info-window">
+                                    <h3>Bus ${bus.route}</h3>
+                                    <div class="status">
+                                        Status: <span style="color: ${getStatusColor(bus.status)}">${bus.status}</span>
+                                    </div>
+                                    <div class="time">
+                                        <strong>Current Time (IST):</strong><br>
+                                        ${formatTimeIST(new Date())}
+                                    </div>
+                                    <div class="time">
+                                        <strong>Estimated Arrival (IST):</strong><br>
+                                        ${estimatedArrival}
+                                    </div>
+                                    <div class="route">
+                                        <strong>From:</strong> ${bus.from}<br>
+                                        <strong>To:</strong> ${bus.to}
+                                    </div>
+                                    <div class="update-time">
+                                        Last Updated: ${formatTimeIST(new Date())}
+                                    </div>
+                                </div>
+                            `;
+                            
+                            if (currentInfoWindow) {
+                                currentInfoWindow.close();
+                            }
+                            
+                            currentInfoWindow = new google.maps.InfoWindow({
+                                content
+                            });
+                            
+                            currentInfoWindow.open({
+                                map,
+                                anchor: marker
+                            });
+                        });
+
+                        markers.set(bus.id, marker);
+                    }
+                });
+            } catch (error) {
+                console.error('Error updating bus data:', error);
+            }
+        }
+
+        // Helper function to get status color
+        function getStatusColor(status) {
+            const statusColors = {
+                'ON_TIME': '#4CAF50',
+                'DELAYED': '#F44336',
+                'AHEAD': '#2196F3',
+                'STOPPED': '#FFC107',
+                'NOT_STARTED': '#9E9E9E',
+                'COMPLETED': '#795548',
+                'CANCELLED': '#FF5722'
+            };
+            return statusColors[status] || '#9E9E9E';
+        }
+
+        // Add styles for markers
+        const style = document.createElement('style');
+        style.textContent = `
+            .bus-marker {
+                cursor: pointer;
+                transition: transform 0.2s;
+            }
+            .bus-marker:hover {
+                transform: scale(1.1);
+            }
+            .gm-style-iw {
+                border-radius: 8px;
+                box-shadow: 0 2px 7px 1px rgba(0,0,0,0.3);
+            }
+            .gm-style-iw button {
+                background: #fff !important;
+                border-radius: 50% !important;
+                top: 0 !important;
+                right: 0 !important;
+            }
+        `;
+        document.head.appendChild(style);
+
+        // Update bus list display
+        function updateBusList(buses) {
+            const busListElement = document.getElementById('busList');
+            busListElement.innerHTML = buses.map(bus => `
+                <div class="bus-card">
+                    <h3>Bus ${bus.id}</h3>
+                    <p>Route: ${bus.route} (${bus.from} → ${bus.to})</p>
+                    <p>Current Location: ${bus.currentLocation}</p>
+                    <p>Next Stop: ${bus.nextStop}</p>
+                    <p>Status: <span class="status-${bus.status.toLowerCase()}">${bus.status}</span></p>
+                    <p>Speed: ${bus.speed} km/h</p>
+                    <p>ETA to next stop: ${bus.eta} mins</p>
+                    <p>Traffic: <span class="traffic-${bus.trafficCondition.toLowerCase()}">${bus.trafficCondition}</span></p>
+                    <p>Last Updated: ${new Date(bus.lastUpdated).toLocaleTimeString()}</p>
+                </div>
+            `).join('');
+        }
+
+        // Update route table
+        function updateRouteTable() {
+            const dtcRoutes = [
+                // Major Corridor Routes
+                { route: '100', from: 'Shivaji Stadium', to: 'IGI Airport Terminal 3', stops: ['Shivaji Stadium', 'Dhaula Kuan', 'IGI Airport Terminal 2', 'IGI Airport Terminal 3'] },
+                { route: '181', from: 'New Delhi Railway Station', to: 'Mehrauli', stops: ['New Delhi Railway Station', 'Connaught Place', 'AIIMS', 'IIT Delhi', 'Qutub Minar', 'Mehrauli'] },
+                { route: '274', from: 'Shivaji Stadium', to: 'Noida Sector 62', stops: ['Shivaji Stadium', 'ITO', 'Akshardham', 'Noida Sector 15', 'Noida Sector 62'] },
+                { route: '340', from: 'Shivaji Stadium', to: 'Ghaziabad', stops: ['Shivaji Stadium', 'ITO', 'Anand Vihar ISBT', 'Vaishali', 'Ghaziabad'] },
+                
+                // North Delhi Routes
+                { route: '901', from: 'Azadpur', to: 'Old Delhi', stops: ['Azadpur', 'Model Town', 'Kashmere Gate ISBT', 'Red Fort', 'Old Delhi'] },
+                { route: '902', from: 'Rohini Sector 22', to: 'Connaught Place', stops: ['Rohini Sector 22', 'Rohini Sector 18', 'Pitampura', 'Karol Bagh', 'Connaught Place'] },
+                { route: '903', from: 'Narela', to: 'Kashmere Gate ISBT', stops: ['Narela', 'Bawana', 'Rohini', 'Azadpur', 'Kashmere Gate ISBT'] },
+                
+                // South Delhi Routes
+                { route: 'ML-77', from: 'Mehrauli', to: 'AIIMS', stops: ['Mehrauli', 'Qutub Minar', 'Hauz Khas', 'Green Park', 'AIIMS'] },
+                { route: '442', from: 'Saket', to: 'Lajpat Nagar', stops: ['Saket', 'Malviya Nagar', 'Greater Kailash', 'Lajpat Nagar'] },
+                { route: '479', from: 'Vasant Kunj', to: 'South Extension', stops: ['Vasant Kunj', 'Munirka', 'IIT Delhi', 'South Extension'] },
+                
+                // East Delhi Routes
+                { route: '534', from: 'Anand Vihar ISBT', to: 'Connaught Place', stops: ['Anand Vihar ISBT', 'Preet Vihar', 'ITO', 'Delhi Gate', 'Connaught Place'] },
+                { route: '543', from: 'Mayur Vihar Phase III', to: 'Old Delhi', stops: ['Mayur Vihar Phase III', 'Akshardham', 'ITO', 'Delhi Gate', 'Old Delhi'] },
+                { route: '611', from: 'Shahdara', to: 'India Gate', stops: ['Shahdara', 'Seelampur', 'Rajghat', 'ITO', 'India Gate'] },
+                
+                // West Delhi Routes
+                { route: '721', from: 'Dwarka Sector 21', to: 'Karol Bagh', stops: ['Dwarka Sector 21', 'Dwarka Mor', 'Janakpuri', 'Rajouri Garden', 'Karol Bagh'] },
+                { route: '764', from: 'Najafgarh', to: 'Delhi Cantt', stops: ['Najafgarh', 'Dwarka', 'Palam', 'Delhi Cantt'] },
+                { route: '783', from: 'Mundka', to: 'Punjabi Bagh', stops: ['Mundka', 'Nangloi', 'Paschim Vihar', 'Punjabi Bagh'] },
+
+                // Additional Routes
+                { route: '44A', from: 'Harsh Vihar', to: 'Old Delhi Railway Station', stops: ['Harsh Vihar', 'Nand Nagri', 'GTB Hospital', 'Shahdara', 'Old Delhi Railway Station'] },
+                { route: '169A', from: 'Anand Vihar ISBT', to: 'Nizamuddin', stops: ['Anand Vihar ISBT', 'Patparganj', 'ITO', 'Delhi Gate', 'Nizamuddin'] },
+                { route: '234A', from: 'Nangloi', to: 'Mori Gate', stops: ['Nangloi', 'Paschim Vihar', 'Punjabi Bagh', 'Karol Bagh', 'Mori Gate'] },
+                { route: '323A', from: 'Uttam Nagar', to: 'Connaught Place', stops: ['Uttam Nagar', 'Janakpuri', 'Rajouri Garden', 'Karol Bagh', 'Connaught Place'] },
+                { route: '429A', from: 'Rohini Sector 22', to: 'Old Delhi Railway Station', stops: ['Rohini Sector 22', 'Rohini Sector 18', 'Azadpur', 'Kashmere Gate', 'Old Delhi Railway Station'] },
+
+                // Express Routes
+                { route: 'EXP-1', from: 'Anand Vihar', to: 'Gurugram', stops: ['Anand Vihar', 'ITO', 'Dhaula Kuan', 'Gurugram'] },
+                { route: 'EXP-2', from: 'Rohini', to: 'Noida', stops: ['Rohini', 'ISBT', 'ITO', 'Noida'] },
+                { route: 'EXP-3', from: 'Dwarka', to: 'Noida', stops: ['Dwarka', 'Delhi Cantt', 'South Delhi', 'Noida'] },
+                { route: 'EXP-4', from: 'Rohini', to: 'Gurugram', stops: ['Rohini', 'Punjabi Bagh', 'Dhaula Kuan', 'Gurugram'] },
+
+                // Airport Special Routes
+                { route: 'AS-1', from: 'New Delhi Station', to: 'IGI T3', stops: ['New Delhi Station', 'Connaught Place', 'Dhaula Kuan', 'IGI T3'] },
+                { route: 'AS-2', from: 'Anand Vihar', to: 'IGI T3', stops: ['Anand Vihar', 'ITO', 'Delhi Cantt', 'IGI T3'] },
+                { route: 'AS-3', from: 'Rohini', to: 'IGI T1', stops: ['Rohini', 'Punjabi Bagh', 'Palam', 'IGI T1'] },
+
+                // Metro Feeder Routes
+                { route: 'MF-101', from: 'Rohini West Metro', to: 'Rithala', stops: ['Rohini West Metro', 'Sector 7', 'Sector 11', 'Rithala'] },
+                { route: 'MF-102', from: 'Dwarka Mor', to: 'Uttam Nagar', stops: ['Dwarka Mor', 'Sector 1', 'Sector 7', 'Uttam Nagar'] },
+                { route: 'MF-103', from: 'Mayur Vihar', to: 'Trilokpuri', stops: ['Mayur Vihar', 'Phase 1', 'Phase 2', 'Trilokpuri'] },
+
+                // Night Service Routes
+                { route: 'NS-1', from: 'ISBT', to: 'IGI Airport', stops: ['ISBT', 'Connaught Place', 'Dhaula Kuan', 'IGI Airport'] },
+                { route: 'NS-2', from: 'New Delhi Railway Station', to: 'Dwarka', stops: ['New Delhi Railway Station', 'Karol Bagh', 'Rajouri Garden', 'Dwarka'] },
+                { route: 'NS-3', from: 'Anand Vihar', to: 'Rohini', stops: ['Anand Vihar', 'ITO', 'Kashmere Gate', 'Rohini'] },
+                
+                // Circular Routes
+                { route: 'CR-1', from: 'Central Secretariat', to: 'Central Secretariat', stops: ['Central Secretariat', 'India Gate', 'Pragati Maidan', 'ITO', 'Central Secretariat'] },
+                { route: 'CR-2', from: 'Connaught Place', to: 'Connaught Place', stops: ['Connaught Place', 'Mandi House', 'ITO', 'Delhi Gate', 'Connaught Place'] },
+                { route: 'CR-3', from: 'AIIMS', to: 'AIIMS', stops: ['AIIMS', 'South Extension', 'Defence Colony', 'Lajpat Nagar', 'AIIMS'] },
+
+                // Regular Routes from Live Tracking
+                { route: '101', from: 'Old Delhi Railway Station', to: 'Swaroop Nagar', stops: ['Old Delhi Railway Station', 'Novelty Cinema', 'Mori Gate', 'ISBT Kashmere', 'Civil Lines', 'Old Secretariat', 'GTB Nagar', 'Model Town', 'Azadpur', 'Adarsh Nagar', 'Jahangirpuri', 'Swaroop Nagar'] },
+                { route: '102', from: 'Anand Vihar', to: 'Uttam Nagar', stops: ['Anand Vihar', 'Laxmi Nagar', 'ITO', 'Connaught Place', 'Karol Bagh', 'Rajouri Garden', 'Janakpuri', 'Uttam Nagar'] },
+                { route: '105', from: 'Mukhmelpur Village', to: 'Kashmere Gate ISBT', stops: ['Mukhmelpur', 'Narela', 'Ramdev Chowk', 'Shahbad Dairy', 'Rohini Sec 18', 'Rohini', 'Model Town', 'GTB Nagar', 'ISBT Kashmere'] },
+                { route: '114', from: 'Uttam Nagar', to: 'Karol Bagh', stops: ['Uttam Nagar', 'Janakpuri', 'Rajouri Garden', 'Karol Bagh'] },
+                { route: '120', from: 'Ramdev Chowk Narela', to: 'Mori Gate', stops: ['Ramdev Chowk', 'Narela', 'Bawana', 'Rohini', 'Azadpur', 'Model Town', 'Civil Lines', 'Mori Gate'] },
+                { route: '130', from: 'Old Delhi Railway Station', to: 'Ghoga Village', stops: ['Old Delhi Railway Station', 'Mori Gate', 'Civil Lines', 'Azadpur', 'Mukharba Chowk', 'Rohini', 'Bawana', 'Ghoga Village'] }
+            ];
+
+            const tbody = document.getElementById('routeTableBody');
+            tbody.innerHTML = dtcRoutes.map(route => `
+                <tr>
+                    <td>
+                        <div class="route-info">
+                            <strong>Route ${route.route}</strong>
+                            <div class="route-actions">
+                                <button class="track-btn" onclick="trackRoute('${route.route}')">Track</button>
+                                <button class="visualize-btn" onclick="visualizeRoute('${route.route}', '${route.from}', '${route.to}')">Show on Map</button>
+                            </div>
+                        </div>
+                    </td>
+                    <td>${route.from}</td>
+                    <td>${route.to}</td>
+                    <td>${route.stops.join(' → ')}</td>
+                </tr>
+            `).join('');
+        }
+
+        function trackRoute(routeNumber) {
+            const panel = document.getElementById('trackingPanel');
+            const trackingInfo = document.getElementById('trackingInfo');
+            panel.classList.add('active');
+
+            // Find all buses on this route
+            const busesOnRoute = allBuses.filter(bus => bus.route === routeNumber);
+
+            if (busesOnRoute.length === 0) {
+                trackingInfo.innerHTML = `
+                    <div class="live-info">
+                        <p>No buses currently active on route ${routeNumber}</p>
+                    </div>
+                `;
+                return;
+            }
+
+            trackingInfo.innerHTML = busesOnRoute.map(bus => `
+                <div class="live-info">
+                    <h4>Bus ${bus.id}</h4>
+                    <p>
+                        <strong>Route:</strong> ${bus.route}
+                        <span class="status-indicator ${bus.status.toLowerCase()}"></span>
+                        ${bus.status}
+                    </p>
+                    <p><strong>Current Location:</strong> ${bus.currentLocation}</p>
+                    <p><strong>Next Stop:</strong> ${bus.nextStop}</p>
+                    <p>
+                        <strong>Traffic:</strong> 
+                        <span class="traffic-indicator traffic-${bus.trafficCondition}">
+                            ${bus.trafficCondition}
+                        </span>
+                    </p>
+                    <p><strong>Speed:</strong> ${bus.speed} km/h</p>
+                    <p><strong>ETA to next stop:</strong> ${bus.eta} mins</p>
+                    <p><strong>Last Updated:</strong> ${new Date(bus.lastUpdated).toLocaleTimeString()}</p>
+                </div>
+            `).join('');
+
+            // Set up automatic refresh
+            if (window.trackingInterval) {
+                clearInterval(window.trackingInterval);
+            }
+            window.trackingInterval = setInterval(() => {
+                if (panel.classList.contains('active')) {
+                    trackRoute(routeNumber);
+                }
+            }, 30000); // Update every 30 seconds
+        }
+
+        function showRoutesOnMap(routeNumber) {
+            // Switch to map view if not already there
+            showSection('live-tracking');
+            
+            const route = window.allRoutes.find(r => r.route === routeNumber);
+            if (!route) return;
+
+            // Clear existing route visualization
+            clearRouteVisualization();
+
+            const fromStopIndex = route.stops.indexOf(route.stops[0]);
+            const toStopIndex = route.stops.indexOf(route.stops[route.stops.length - 1]);
+            const relevantStops = route.stops.slice(fromStopIndex, toStopIndex + 1);
+
+            // Create path coordinates for the route
+            const pathCoordinates = [];
+            relevantStops.forEach(stop => {
+                // Get coordinates for each stop (you'll need to add these to your data)
+                const stopCoords = getStopCoordinates(stop);
+                if (stopCoords) {
+                    pathCoordinates.push(stopCoords);
+                }
+            });
+
+            // Draw the route on the map
+            const routePath = new google.maps.Polyline({
+                path: pathCoordinates,
+                geodesic: true,
+                strokeColor: '#1976d2',
+                strokeOpacity: 1.0,
+                strokeWeight: 4,
+                map: map,
+                icons: [{
+                    icon: {
+                        path: google.maps.SymbolPath.CIRCLE,
+                        scale: 8,
+                        strokeColor: '#1976d2'
+                    },
+                    offset: '100%'
+                }]
+            });
+
+            // Animate the route
+            animateRoute(routePath);
+
+            // Add markers for from and to stops
+            const fromMarker = new google.maps.Marker({
+                position: pathCoordinates[0],
+                map: map,
+                title: route.stops[fromStopIndex],
+                icon: {
+                    url: 'http://maps.google.com/mapfiles/ms/icons/green-dot.png',
+                    labelOrigin: new google.maps.Point(16, 40)
+                },
+                label: {
+                    text: 'From',
+                    color: '#1976d2'
+                }
+            });
+
+            const toMarker = new google.maps.Marker({
+                position: pathCoordinates[pathCoordinates.length - 1],
+                map: map,
+                title: route.stops[toStopIndex],
+                icon: {
+                    url: 'http://maps.google.com/mapfiles/ms/icons/red-dot.png',
+                    labelOrigin: new google.maps.Point(16, 40)
+                },
+                label: {
+                    text: 'To',
+                    color: '#1976d2'
+                }
+            });
+
+            // Fit map bounds to show the entire route
+            const bounds = new google.maps.LatLngBounds();
+            pathCoordinates.forEach(coord => bounds.extend(coord));
+            map.fitBounds(bounds);
+        }
+
+        function clearRouteVisualization() {
+            if (window.currentRoute) {
+                window.currentRoute.setMap(null);
+            }
+            if (window.routeMarkers && Array.isArray(window.routeMarkers)) {
+                window.routeMarkers.forEach(marker => {
+                    if (marker && typeof marker.setMap === 'function') {
+                        marker.setMap(null);
+                    }
+                });
+            }
+            window.routeMarkers = [];
+            if (window.routeAnimation) {
+                clearInterval(window.routeAnimation);
+                window.routeAnimation = null;
+            }
+        }
+
+        function animateRoute(routePath) {
+            let count = 0;
+            window.currentRoute = routePath;
+
+            if (window.routeAnimation) {
+                clearInterval(window.routeAnimation);
+            }
+
+            window.routeAnimation = setInterval(() => {
+                count = (count + 1) % 200;
+                const icons = routePath.get('icons');
+                icons[0].offset = (count / 2) + '%';
+                routePath.set('icons', icons);
+            }, 20);
+        }
+
+        function getStopCoordinates(stopName) {
+            const stopCoordinates = {
+                'Shivaji Stadium': { lat: 28.6329, lng: 77.2163 },
+                'Dhaula Kuan': { lat: 28.5921, lng: 77.1691 },
+                'IGI Airport Terminal 2': { lat: 28.5563, lng: 77.1000 },
+                'IGI Airport Terminal 3': { lat: 28.5570, lng: 77.0866 },
+                'Connaught Place': { lat: 28.6289, lng: 77.2074 },
+                'New Delhi Railway Station': { lat: 28.6419, lng: 77.2193 },
+                'AIIMS': { lat: 28.5672, lng: 77.2100 },
+                'ITO': { lat: 28.6280, lng: 77.2407 },
+                'Kashmere Gate': { lat: 28.6671, lng: 77.2297 },
+                'Anand Vihar ISBT': { lat: 28.6472, lng: 77.3159 },
+                'Rohini': { lat: 28.7197, lng: 77.1378 },
+                'Dwarka': { lat: 28.5823, lng: 77.0500 },
+                'Mehrauli': { lat: 28.5244, lng: 77.1855 },
+                'Lajpat Nagar': { lat: 28.5700, lng: 77.2400 },
+                'India Gate': { lat: 28.6129, lng: 77.2295 },
+                'Delhi Gate': { lat: 28.6406, lng: 77.2340 }
+            };
+            
+            if (!stopCoordinates[stopName]) {
+                const delhiCenter = { lat: 28.6139, lng: 77.2090 };
+                const spread = 0.1;
+                return {
+                    lat: delhiCenter.lat + (Math.random() - 0.5) * spread,
+                    lng: delhiCenter.lng + (Math.random() - 0.5) * spread
+                };
+            }
+            
+            return stopCoordinates[stopName];
+        }
+
+        // Add click handler for tracking panel close
+        document.addEventListener('click', function(event) {
+            const panel = document.getElementById('trackingPanel');
+            const isClickInside = panel.contains(event.target);
+            const isTrackButton = event.target.classList.contains('track-btn');
+            
+            if (!isClickInside && !isTrackButton && panel.classList.contains('active')) {
+                closeTrackingPanel();
+            }
+        });
+
+        // Initialize with routes section active
+        window.addEventListener('load', function() {
+            showSection('routes');
+        });
+
+        // Update the fetchBusData function to show live locations
+        async function fetchBusData() {
+            try {
+                let buses;
+                const apiUrl = 'http://127.0.0.1:4567/api/buses';  // Always use the Flask backend URL
+                
+                try {
+                    const res = await fetch(apiUrl, { 
+                        cache: 'no-store',
+                        headers: {
+                            'Accept': 'application/json',
+                            'Content-Type': 'application/json'
+                        }
+                    });
+                    if (!res.ok) throw new Error('Network response was not ok: ' + res.status);
+                    buses = await res.json();
+                    if (!Array.isArray(buses)) throw new Error('API did not return an array');
+                    
+                    // Update live locations display
+                    const liveLocations = document.getElementById('live-locations');
+                    if (liveLocations) {
+                        liveLocations.innerHTML = buses.map(bus => `
+                    <div class="bus-card">
+                                <div class="bus-number">Bus ${bus.busNumber}</div>
+                                <div class="location-details">
+                                    <div><strong>Current Location:</strong> ${bus.nextStop || 'Approaching next stop'}</div>
+                                    <div><strong>Coordinates:</strong> ${bus.lat.toFixed(4)}°N, ${bus.lng.toFixed(4)}°E</div>
+                                    <div><strong>Route:</strong> ${bus.source} → ${bus.destination}</div>
+                                    <div><strong>ETA:</strong> ${bus.timeToDestination} mins</div>
+                                    <div class="update-time" style="color:var(--text-secondary);font-size:0.9em;margin-top:8px;">Last updated: ${new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true })}</div>
+                        </div>
+                    </div>
+                `).join('');
+                    }
+                    
+                } catch (err) {
+                    console.error('Error fetching bus data:', err);
+                    throw err;
+                }
+                renderBusTables(buses);
+                if (typeof google !== 'undefined' && map) updateMap(buses);
+            } catch (e) {
+                document.getElementById('route-table').innerHTML = '<p style="color:red">Failed to load bus data.<br>' + (e.message || e) + '</p>';
+                document.getElementById('live-table').innerHTML = '<p style="color:red">Failed to load bus data.<br>' + (e.message || e) + '</p>';
+                document.getElementById('schedule-table').innerHTML = '<p style="color:red">Failed to load bus data.<br>' + (e.message || e) + '</p>';
+                document.getElementById('live-locations').innerHTML = '<p style="color:red">Failed to load live location data.</p>';
+            }
+        }
+
+        // Add or update bus markers on the map
+        let busMarkers = {};
+        function updateMap(buses) {
+            if (!window.map || typeof google === 'undefined') return;
+            // Remove markers for buses that no longer exist
+            for (const id in busMarkers) {
+                if (!buses.find(bus => bus.busNumber === id)) {
+                    busMarkers[id].setMap(null);
+                    delete busMarkers[id];
+                }
+            }
+            // Add or update markers for each bus
+            buses.forEach(bus => {
+                const position = { lat: bus.lat, lng: bus.lng };
+                if (busMarkers[bus.busNumber]) {
+                    busMarkers[bus.busNumber].setPosition(position);
+                } else {
+                    const marker = new google.maps.Marker({
+                        position,
+                        map: window.map,
+                        title: `Bus ${bus.busNumber}`,
+                        icon: {
+                            path: google.maps.SymbolPath.CIRCLE,
+                            scale: 8,
+                            fillColor: '#1976d2',
+                            fillOpacity: 1,
+                            strokeWeight: 2,
+                            strokeColor: '#fff',
+                        }
+                    });
+                    const infoWindow = new google.maps.InfoWindow({
+                        content: `<div><strong>Bus ${bus.busNumber}</strong><br>Route: ${bus.source} → ${bus.destination}<br>Current: ${bus.nextStop || 'N/A'}<br>ETA: ${bus.timeToDestination} mins</div>`
+                    });
+                    marker.addListener('click', () => {
+                        infoWindow.open(window.map, marker);
+                    });
+                    busMarkers[bus.busNumber] = marker;
+                }
+            });
+        }
+    </script>
+</body>
+</html>
